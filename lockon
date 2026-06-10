@@ -47,7 +47,7 @@ if [ $# -eq 0 ]; then
 fi
 
 : "${app_id:=$1}"
-: "${threshold:=1}" # default is 1 minute in seconds
+: "${threshold:=10}" # default is 1 minute in seconds
 
 if command -v niri >/dev/null 2>&1; then
   readonly WM=niri
@@ -68,15 +68,23 @@ niri)
   next_window_id=$(
     niri msg --json windows | jq --raw-output --argjson current_window "$current_window" --arg app_id "$app_id" --arg threshold "$threshold" '
       if $current_window then
-        map(select(.app_id == $app_id) | .id) as $window_ids
-        | ($window_ids | index($current_window.id)) as $current_index
+        map(select(.app_id == $app_id) | {id: .id, focus_timestamp: .focus_timestamp.secs * 1e9 + .focus_timestamp.nanos }) as $windows
+        | ([$windows[].id] | index($current_window.id)) as $current_index
+        | ($windows | length) as $window_count
         |
-        if $current_index + 1 >= ($window_ids | length) then
+        if $window_count == 1 then
+          # no windows for this app, so we should spawn a new one
+          empty
+        elif $current_index + 1 >= $window_count then
           # if the current window is the last one, cycle back to the first
-          $window_ids[0]
+          $windows[0].id
         else
-          # otherwise, focus the next window
-          $window_ids[$current_index + 1]
+          if true then
+            # focus the next window
+            $windows[$current_index + 1].id
+          else
+            empty
+          end
         end // empty
       else
         # we havent started looping through the apps windows yet, so just find the most recently focused window
@@ -89,7 +97,7 @@ niri)
   if [ -n "$next_window_id" ]; then
     niri msg action focus-window --id "$next_window_id"
   else
-    nohup "$@" &
+    "$@" &
   fi
   ;;
 esac
