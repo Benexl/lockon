@@ -1,0 +1,86 @@
+#!/usr/bin/env sh
+
+while [ $# -gt 0 ]; do
+  shift_count=1
+  case "$1" in
+  -h | --help)
+    printf "Usage: lockon [OPTIONS] [ARGUMENTS]\n"
+    exit 0
+    ;;
+  -a | --app-id)
+    app_id="$2"
+    shift_count=2
+    ;;
+  -t | --threshold)
+    threshold="$2"
+    shift_count=2
+    ;;
+  --)
+    shift
+    break
+    ;;
+  *)
+    break
+    ;;
+  esac
+  shift "$shift_count"
+done
+
+if [ $# -eq 0 ] && [ -z "$app_id" ]; then
+  printf "At least one argument is required: no command given"
+  exit 1
+fi
+
+: "${app_id:=$1}"
+: "${threshold:=60}" # default is 1 minute in seconds
+
+if command -v niri >/dev/null 2>&1; then
+  readonly WM=niri
+else
+  # may support other window managers in the future like hyprland, sway, etc. if the feature this script provides is not already built in
+  if [ -t 1 ]; then
+    printf "Current window manager is not supported.\n"
+  else
+    notify-send "Current window manager is not supported."
+  fi
+  exit 1
+fi
+
+case "$WM" in
+niri)
+  current_window=$(niri msg --json focused-window | jq --arg app_id "$app_id" 'if . and .app_id == $app_id then { id: .id, app_id: .app_id, focus_timestamp: .focus_timestamp.secs * 1e9 + .focus_timestamp.nanos } else null end')
+
+  next_window_id=$(
+    niri msg --json windows | jq --raw-output --argjson current_window "$current_window" --arg app_id "$app_id" --arg threshold "$threshold" '
+      map(select(.app_id == $app_id))
+      | sort_by(.focus_timestamp) as $app_windows
+      |
+      if $app_windows | length == 0 then
+        empty
+      else
+        if $current_window then
+          # determine if we have already looped through all windows
+          if reduce .[] as $window (0; . + ($current_window.focus_timestamp - ($window.focus_timestamp.secs * 1e9 + $window.focus_timestamp.nanos))) < $threshold * 1e9 then
+            $app_windows
+            | first # pick the least recently focused window
+            | .id // empty
+          else
+            # create new window
+            empty
+          end
+        else
+          # we havent started looping through the apps windows yet, so just find the most recently focused window
+          $app_windows
+          | last # pick the most recently focused window with the same app_id
+          | .id // empty
+        end
+      end
+      '
+  )
+  if [ -n "$next_window_id" ]; then
+    niri msg action focus-window --id "$next_window_id"
+  else
+    niri msg action spawn-sh -- "$@"
+  fi
+  ;;
+esac
