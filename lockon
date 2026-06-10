@@ -6,14 +6,10 @@ usage() {
   printf "Usage: lockon [OPTIONS] [COMMAND...]\n"
   printf "Options:\n"
   printf "  -a, --app-id ID    Target application ID (required if the command name is not the same as app_id)\n"
-  printf "  -t, --threshold N  Seconds after which to spawn a new window instead of cycling (default: 60)\n"
+  printf "  -t, --threshold N  Seconds after which to spawn a new window instead of cycling (default: 5)\n"
   printf "  -h, --help         Show this help\n"
   exit "${1:-0}"
 }
-
-app_id=""
-threshold=60
-command_args=""
 
 while [ $# -gt 0 ]; do
   skip=1
@@ -47,7 +43,7 @@ if [ $# -eq 0 ]; then
 fi
 
 : "${app_id:=$1}"
-: "${threshold:=10}" # default is 1 minute in seconds
+: "${threshold:=5}" # default is 1 minute in seconds
 
 if command -v niri >/dev/null 2>&1; then
   readonly WM=niri
@@ -66,20 +62,20 @@ niri)
   current_window=$(niri msg --json focused-window | jq --arg app_id "$app_id" 'if . and .app_id == $app_id then { id: .id, app_id: .app_id, focus_timestamp: .focus_timestamp.secs * 1e9 + .focus_timestamp.nanos } else null end')
 
   next_window_id=$(
-    niri msg --json windows | jq --raw-output --argjson current_window "$current_window" --arg app_id "$app_id" --arg threshold "$threshold" '
+    niri msg --json windows | jq --raw-output --argjson machine_start_time "$(awk '{print $1}' /proc/uptime)" --argjson current_window "$current_window" --arg app_id "$app_id" --argjson threshold "$threshold" '
       if $current_window then
         map(select(.app_id == $app_id) | {id: .id, focus_timestamp: .focus_timestamp.secs * 1e9 + .focus_timestamp.nanos }) as $windows
         | ([$windows[].id] | index($current_window.id)) as $current_index
         | ($windows | length) as $window_count
         |
         if $window_count == 1 then
-          # no windows for this app, so we should spawn a new one
+          # only current window is open, so we should spawn a new one
           empty
         elif $current_index + 1 >= $window_count then
           # if the current window is the last one, cycle back to the first
           $windows[0].id
         else
-          if true then
+        if ($machine_start_time - $windows[$current_index + 1].focus_timestamp/1e9) > $threshold then
             # focus the next window
             $windows[$current_index + 1].id
           else
@@ -97,9 +93,7 @@ niri)
   if [ -n "$next_window_id" ]; then
     niri msg action focus-window --id "$next_window_id"
   else
-    "$@" &
+    nohup "$@" >/dev/null 2>&1 &
   fi
   ;;
 esac
-
-exit 0
