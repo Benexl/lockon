@@ -1,38 +1,53 @@
 #!/usr/bin/env sh
 
+set -eu # exit on error, undefined variable
+
+usage() {
+  printf "Usage: lockon [OPTIONS] [COMMAND...]\n"
+  printf "Options:\n"
+  printf "  -a, --app-id ID    Target application ID (required if the command name is not the same as app_id)\n"
+  printf "  -t, --threshold N  Seconds after which to spawn a new window instead of cycling (default: 60)\n"
+  printf "  -h, --help         Show this help\n"
+  exit "${1:-0}"
+}
+
+app_id=""
+threshold=60
+command_args=""
+
 while [ $# -gt 0 ]; do
-  shift_count=1
+  skip=1
   case "$1" in
-  -h | --help)
-    printf "Usage: lockon [OPTIONS] [ARGUMENTS]\n"
-    exit 0
-    ;;
+  -h | --help) usage ;;
   -a | --app-id)
     app_id="$2"
-    shift_count=2
+    skip=2
     ;;
   -t | --threshold)
     threshold="$2"
-    shift_count=2
+    skip=2
     ;;
   --)
     shift
     break
     ;;
+  -*)
+    printf "Unknown option: %s\n" "$1" >&2
+    exit 1
+    ;;
   *)
     break
     ;;
   esac
-  shift "$shift_count"
+  shift "$skip"
 done
-
-if [ $# -eq 0 ] && [ -z "$app_id" ]; then
-  printf "At least one argument is required: no command given"
+if [ $# -eq 0 ]; then
+  printf "Error: No command given.\n" >&2
   exit 1
 fi
 
 : "${app_id:=$1}"
-: "${threshold:=60}" # default is 1 minute in seconds
+: "${threshold:=1}" # default is 1 minute in seconds
 
 if command -v niri >/dev/null 2>&1; then
   readonly WM=niri
@@ -52,35 +67,26 @@ niri)
 
   next_window_id=$(
     niri msg --json windows | jq --raw-output --argjson current_window "$current_window" --arg app_id "$app_id" --arg threshold "$threshold" '
-      map(select(.app_id == $app_id))
-      | sort_by(.focus_timestamp) as $app_windows
-      |
-      if $app_windows | length == 0 then
-        empty
+      if $current_window then
+        sort_by(.focus_timestamp.secs * 1e9 + .focus_timestamp.nanos)
+        | reverse
+        | first(.[] | select((.app_id == $app_id and $current_window.focus_timestamp - (.focus_timestamp.secs * 1e9 + .focus_timestamp.nanos)) > $threshold * 1e9))
+        | .id // empty
       else
-        if $current_window then
-          # determine if we have already looped through all windows
-          if reduce .[] as $window (0; . + ($current_window.focus_timestamp - ($window.focus_timestamp.secs * 1e9 + $window.focus_timestamp.nanos))) < $threshold * 1e9 then
-            $app_windows
-            | first # pick the least recently focused window
-            | .id // empty
-          else
-            # create new window
-            empty
-          end
-        else
-          # we havent started looping through the apps windows yet, so just find the most recently focused window
-          $app_windows
-          | last # pick the most recently focused window with the same app_id
-          | .id // empty
-        end
+        # we havent started looping through the apps windows yet, so just find the most recently focused window
+        sort_by(.focus_timestamp.secs * 1e9 + .focus_timestamp.nanos)
+        | reverse
+        | first(.[] | select(.app_id == $app_id))
+        | .id // empty
       end
       '
   )
   if [ -n "$next_window_id" ]; then
     niri msg action focus-window --id "$next_window_id"
   else
-    niri msg action spawn-sh -- "$@"
+    nohup "$@" &
   fi
   ;;
 esac
+
+exit 0
